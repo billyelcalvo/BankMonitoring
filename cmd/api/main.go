@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"bankmonitoring/internal/auth"
 	"bankmonitoring/internal/httpapi"
 )
 
@@ -22,6 +24,15 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
+	key, err := base64.StdEncoding.DecodeString(os.Getenv("JWT_SECRET"))
+	if err != nil {
+		return errors.New("JWT_SECRET must be a base64-encoded random key")
+	}
+	tokens, err := auth.NewTokenService(key, "bankmonitoring", "bankmonitoring-api")
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -32,7 +43,7 @@ func run(logger *slog.Logger) error {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           httpapi.NewHandler(),
+		Handler:           httpapi.NewHandler(tokens),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
