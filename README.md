@@ -12,7 +12,8 @@ Backend en Go con `net/http` y `github.com/golang-jwt/jwt/v5` para JWT.
 cmd/api/main.go             Entrada, configuración y ciclo de vida del servidor
 internal/auth/             Emisión de JWT, autenticación y permisos
 internal/httpapi/routes.go  Rutas y handlers HTTP
-internal/transfer/types.go  Tipos de transferencias y constantes de estado
+internal/domain/entities/  Entidades de transferencias
+internal/domain/valueobjects/  Estados de transferencias
 go.mod                     Módulo y dependencias
 ```
 
