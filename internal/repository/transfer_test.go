@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"bankmonitoring/internal/domain/entities"
-	"bankmonitoring/internal/domain/repositories"
+	domainrepository "bankmonitoring/internal/domain/repository"
 	"bankmonitoring/internal/domain/valueobjects"
 
 	"github.com/jackc/pgx/v5"
@@ -88,9 +88,9 @@ func TestCreateIdempotent(t *testing.T) {
 	}{
 		{"new", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", transferRow(testRequest)}}, true, nil},
 		{"replay", []queryStep{{"SELECT", transferRow(testRequest)}}, false, nil},
-		{"conflict", []queryStep{{"SELECT", transferRow(changed)}}, false, repositories.ErrIdempotencyConflict},
+		{"conflict", []queryStep{{"SELECT", transferRow(changed)}}, false, domainrepository.ErrIdempotencyConflict},
 		{"concurrent replay", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", transferRow(testRequest)}}, false, nil},
-		{"concurrent conflict", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", transferRow(changed)}}, false, repositories.ErrIdempotencyConflict},
+		{"concurrent conflict", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", transferRow(changed)}}, false, domainrepository.ErrIdempotencyConflict},
 		{"lookup error", []queryStep{{"SELECT", errorRow(dbError)}}, false, dbError},
 		{"insert error", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(dbError)}}, false, dbError},
 		{"concurrent lookup error", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", errorRow(dbError)}}, false, dbError},
@@ -129,7 +129,7 @@ func TestRequestComparison(t *testing.T) {
 				changed.Description = "different"
 			}
 			_, _, err := replay(entities.Transfer{}, testRequest, changed)
-			if !errors.Is(err, repositories.ErrIdempotencyConflict) {
+			if !errors.Is(err, domainrepository.ErrIdempotencyConflict) {
 				t.Fatal("changed request was accepted")
 			}
 		})
@@ -163,7 +163,7 @@ func TestInvalidRequestsNeverQueryDatabase(t *testing.T) {
 			}
 			repo := &TransferRepository{db: &scriptedDB{t: t}}
 			_, _, err := repo.CreateIdempotent(context.Background(), userID, key, request)
-			if !errors.Is(err, repositories.ErrInvalidTransfer) {
+			if !errors.Is(err, domainrepository.ErrInvalidTransfer) {
 				t.Fatalf("expected invalid request, got %v", err)
 			}
 		})

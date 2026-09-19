@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"bankmonitoring/internal/domain/entities"
-	"bankmonitoring/internal/domain/repositories"
+	domainrepository "bankmonitoring/internal/domain/repository"
 	"bankmonitoring/internal/domain/valueobjects"
 
 	"github.com/jackc/pgx/v5"
@@ -24,7 +24,7 @@ type TransferRepository struct {
 	db rowQuerier
 }
 
-var _ repositories.TransferRepository = (*TransferRepository)(nil)
+var _ domainrepository.TransferRepository = (*TransferRepository)(nil)
 
 func NewTransferRepository(pool *pgxpool.Pool) *TransferRepository {
 	return &TransferRepository{db: pool}
@@ -39,12 +39,12 @@ const transferColumns = `id::text, from_account_id, to_account_id, amount,
 func (r *TransferRepository) CreateIdempotent(ctx context.Context, userID, key string, request entities.CreateTransfer) (entities.Transfer, bool, error) {
 	var uuid pgtype.UUID
 	if err := uuid.Scan(key); err != nil || !uuid.Valid || uuid.Bytes == [16]byte{} {
-		return entities.Transfer{}, false, fmt.Errorf("%w: idempotency key must be a nonzero UUID", repositories.ErrInvalidTransfer)
+		return entities.Transfer{}, false, fmt.Errorf("%w: idempotency key must be a nonzero UUID", domainrepository.ErrInvalidTransfer)
 	}
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(request.FromAccountID) == "" ||
 		strings.TrimSpace(request.ToAccountID) == "" || request.FromAccountID == request.ToAccountID || request.Amount <= 0 ||
 		len(request.Currency) != 3 || strings.Trim(request.Currency, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
-		return entities.Transfer{}, false, repositories.ErrInvalidTransfer
+		return entities.Transfer{}, false, domainrepository.ErrInvalidTransfer
 	}
 
 	transfer, original, err := r.find(ctx, userID, uuid)
@@ -106,7 +106,7 @@ func scanTransfer(row pgx.Row) (entities.Transfer, entities.CreateTransfer, erro
 
 func replay(transfer entities.Transfer, original, request entities.CreateTransfer) (entities.Transfer, bool, error) {
 	if original != request {
-		return entities.Transfer{}, false, repositories.ErrIdempotencyConflict
+		return entities.Transfer{}, false, domainrepository.ErrIdempotencyConflict
 	}
 	return transfer, false, nil
 }

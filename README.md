@@ -16,7 +16,7 @@ internal/service/transfer/ Creación de transferencias y comprobación de titula
 internal/httpapi/routes.go  Rutas y handlers HTTP
 internal/domain/entities/  Entidades de transferencias
 internal/domain/valueobjects/  Estados de transferencias
-internal/domain/repositories/  Contratos de persistencia del dominio
+internal/domain/repository/  Contratos de persistencia del dominio
 internal/repository/       Pool pgx e implementación de persistencia
 internal/repository/migrations/  Migraciones SQL
 go.mod                     Módulo y dependencias
@@ -84,9 +84,9 @@ ese usuario, de modo que otro usuario no pueda recuperar sus transferencias.
 - Misma clave y mismos campos: devuelve la transferencia existente con su estado
   actual y `created=false`.
 - Misma clave con cambios de origen, destino, monto, moneda o descripción:
-  devuelve `repositories.ErrIdempotencyConflict` (para mapear a HTTP 409).
+  devuelve `repository.ErrIdempotencyConflict` (para mapear a HTTP 409).
 - UUID inválido, monto no positivo, cuentas vacías o iguales, o moneda sin tres
-  letras mayúsculas: devuelve `repositories.ErrInvalidTransfer`.
+  letras mayúsculas: devuelve `repository.ErrInvalidTransfer`.
 
 Se conserva la solicitud original en JSONB para compararla aunque cambie el
 estado de la transferencia. Se comparan campos, no el orden ni los espacios del

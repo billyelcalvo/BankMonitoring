@@ -7,17 +7,17 @@ import (
 	"strings"
 
 	"bankmonitoring/internal/domain/entities"
-	"bankmonitoring/internal/domain/repositories"
+	"bankmonitoring/internal/domain/repository"
 )
 
 var ErrForbidden = errors.New("access to source account denied")
 
 type Service struct {
-	transfers repositories.TransferRepository
-	accounts  repositories.AccountRepository
+	transfers repository.TransferRepository
+	accounts  repository.AccountRepository
 }
 
-func NewService(transfers repositories.TransferRepository, accounts repositories.AccountRepository) *Service {
+func NewService(transfers repository.TransferRepository, accounts repository.AccountRepository) *Service {
 	return &Service{transfers: transfers, accounts: accounts}
 }
 
@@ -30,7 +30,7 @@ func (s *Service) Create(ctx context.Context, userID, key string, request entiti
 	if strings.TrimSpace(request.FromAccountID) == "" || strings.TrimSpace(request.ToAccountID) == "" ||
 		request.FromAccountID == request.ToAccountID || request.Amount <= 0 || len(request.Currency) != 3 ||
 		strings.Trim(request.Currency, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
-		return entities.Transfer{}, false, repositories.ErrInvalidTransfer
+		return entities.Transfer{}, false, repository.ErrInvalidTransfer
 	}
 	owned, err := s.accounts.IsOwner(ctx, userID, request.FromAccountID)
 	if err != nil {

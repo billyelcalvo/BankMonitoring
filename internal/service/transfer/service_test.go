@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"bankmonitoring/internal/domain/entities"
-	"bankmonitoring/internal/domain/repositories"
+	"bankmonitoring/internal/domain/repository"
 )
 
 type accountStub struct {
@@ -45,7 +45,7 @@ func TestCreateRequiresOwnership(t *testing.T) {
 		{"owner replay", true, false, nil, nil, nil},
 		{"not owner", false, false, nil, nil, ErrForbidden},
 		{"ownership unavailable", false, false, dbError, nil, dbError},
-		{"conflicting retry", true, false, nil, repositories.ErrIdempotencyConflict, repositories.ErrIdempotencyConflict},
+		{"conflicting retry", true, false, nil, repository.ErrIdempotencyConflict, repository.ErrIdempotencyConflict},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			accounts := &accountStub{owned: tc.owned, err: tc.accountErr}

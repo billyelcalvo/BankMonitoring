@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 
-	"bankmonitoring/internal/domain/repositories"
+	domainrepository "bankmonitoring/internal/domain/repository"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -12,7 +12,7 @@ type AccountRepository struct {
 	db rowQuerier
 }
 
-var _ repositories.AccountRepository = (*AccountRepository)(nil)
+var _ domainrepository.AccountRepository = (*AccountRepository)(nil)
 
 func NewAccountRepository(pool *pgxpool.Pool) *AccountRepository {
 	return &AccountRepository{db: pool}

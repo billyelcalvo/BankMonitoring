@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"bankmonitoring/internal/domain/entities"
-	"bankmonitoring/internal/domain/repositories"
+	"bankmonitoring/internal/domain/repository"
 	"bankmonitoring/internal/service/auth"
 	"bankmonitoring/internal/service/transfer"
 )
@@ -56,9 +56,9 @@ func TestCreateTransferRoute(t *testing.T) {
 	}{
 		{"created", allowed, []string{testTransferKey}, transferBody, "application/json", true, nil, 201, true},
 		{"replay", allowed, []string{testTransferKey}, transferBody, "application/json", false, nil, 200, true},
-		{"conflict", allowed, []string{testTransferKey}, transferBody, "application/json", false, repositories.ErrIdempotencyConflict, 409, true},
+		{"conflict", allowed, []string{testTransferKey}, transferBody, "application/json", false, repository.ErrIdempotencyConflict, 409, true},
 		{"foreign account", allowed, []string{testTransferKey}, transferBody, "application/json", false, transfer.ErrForbidden, 403, true},
-		{"invalid transfer", allowed, []string{testTransferKey}, transferBody, "application/json", false, repositories.ErrInvalidTransfer, 400, true},
+		{"invalid transfer", allowed, []string{testTransferKey}, transferBody, "application/json", false, repository.ErrInvalidTransfer, 400, true},
 		{"database error", allowed, []string{testTransferKey}, transferBody, "application/json", false, errors.New("private database details"), 500, true},
 		{"missing token", "", []string{testTransferKey}, transferBody, "application/json", false, nil, 401, false},
 		{"invalid token", "invalid", []string{testTransferKey}, transferBody, "application/json", false, nil, 401, false},

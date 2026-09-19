@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"bankmonitoring/internal/domain/entities"
-	"bankmonitoring/internal/domain/repositories"
+	"bankmonitoring/internal/domain/repository"
 	"bankmonitoring/internal/service/auth"
 	"bankmonitoring/internal/service/transfer"
 
@@ -68,9 +68,9 @@ func createTransfer(service TransferCreator) http.HandlerFunc {
 		switch {
 		case errors.Is(err, transfer.ErrForbidden):
 			writeError(w, http.StatusForbidden, "forbidden")
-		case errors.Is(err, repositories.ErrInvalidTransfer):
+		case errors.Is(err, repository.ErrInvalidTransfer):
 			writeError(w, http.StatusBadRequest, "invalid transfer request")
-		case errors.Is(err, repositories.ErrIdempotencyConflict):
+		case errors.Is(err, repository.ErrIdempotencyConflict):
 			writeError(w, http.StatusConflict, "idempotency key already used with a different request")
 		case err != nil:
 			writeError(w, http.StatusInternalServerError, "could not create transfer")
