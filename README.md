@@ -11,6 +11,7 @@ Backend en Go usando exclusivamente la biblioteca estándar (`net/http`).
 ```text
 cmd/api/main.go             Entrada, configuración y ciclo de vida del servidor
 internal/httpapi/routes.go  Rutas y handlers HTTP
+internal/transfer/types.go  Tipos de transferencias y constantes de estado
 go.mod                     Módulo, sin dependencias externas
 ```
 
