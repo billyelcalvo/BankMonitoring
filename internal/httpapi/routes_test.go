@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"bankmonitoring/internal/auth"
+	"bankmonitoring/internal/service/auth"
 )
 
 func TestRoutes(t *testing.T) {

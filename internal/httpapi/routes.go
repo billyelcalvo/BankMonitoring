@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"bankmonitoring/internal/auth"
+	"bankmonitoring/internal/service/auth"
 )
 
 func NewHandler(tokens *auth.TokenService) http.Handler {

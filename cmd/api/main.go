@@ -11,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"bankmonitoring/internal/auth"
 	"bankmonitoring/internal/httpapi"
+	"bankmonitoring/internal/repository"
+	"bankmonitoring/internal/service/auth"
 )
 
 func main() {
@@ -35,6 +36,12 @@ func run(logger *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	pool, err := repository.NewPool(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
 
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
