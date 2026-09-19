@@ -18,9 +18,10 @@ type CreateTransfer struct {
 
 // Transfer represents a transfer with its server-managed state and metadata.
 type Transfer struct {
-	ID            string `json:"id"`
-	FromAccountID string `json:"from_account_id"`
-	ToAccountID   string `json:"to_account_id"`
+	ID             string `json:"id"`
+	IdempotencyKey string `json:"idempotency_key"`
+	FromAccountID  string `json:"from_account_id"`
+	ToAccountID    string `json:"to_account_id"`
 	// Amount is expressed in the currency's smallest unit (for example, cents).
 	Amount      int64                       `json:"amount"`
 	Currency    string                      `json:"currency"`

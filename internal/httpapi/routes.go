@@ -7,10 +7,12 @@ import (
 	"bankmonitoring/internal/service/auth"
 )
 
-func NewHandler(tokens *auth.TokenService) http.Handler {
+func NewHandler(tokens *auth.TokenService, transfers TransferCreator) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	mux.Handle("GET /me", tokens.Authenticate(http.HandlerFunc(me)))
+	mux.Handle("POST /transfers", tokens.Authenticate(
+		auth.RequirePermission(auth.PermissionTransfersCreate, createTransfer(transfers))))
 	return mux
 }
 

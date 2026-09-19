@@ -19,7 +19,7 @@ func TestRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(tokens)
+	h := NewHandler(tokens, nil)
 	for _, tc := range []struct {
 		method, path, token string
 		status              int

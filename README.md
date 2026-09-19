@@ -12,6 +12,7 @@ Backend en Go con `net/http`, `github.com/golang-jwt/jwt/v5` para JWT y `pgx/v5`
 ```text
 cmd/api/main.go             Entrada, configuración y ciclo de vida del servidor
 internal/service/auth/     Emisión de JWT, autenticación y permisos
+internal/service/transfer/ Creación de transferencias y comprobación de titularidad
 internal/httpapi/routes.go  Rutas y handlers HTTP
 internal/domain/entities/  Entidades de transferencias
 internal/domain/valueobjects/  Estados de transferencias
@@ -48,17 +49,26 @@ para desarrollo local. Ajusta las credenciales y TLS a tu servidor PostgreSQL.
 
 ## Persistencia e idempotencia
 
-Antes de usar el repositorio, aplica una vez la migración sobre tu base de datos:
+Antes de usar el repositorio, aplica una vez cada migración pendiente, en orden:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f internal/repository/migrations/001_create_transfers.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f internal/repository/migrations/002_create_accounts.sql
 ```
 
 La aplicación no ejecuta migraciones automáticamente.
 
+La tabla `accounts` relaciona `id` (cuenta) con `user_id` (el `sub` del JWT).
+Estas relaciones deben cargarse mediante un proceso confiable del servidor;
+no se crean a partir de una petición de transferencia. Una cuenta inexistente
+o perteneciente a otro usuario devuelve 403. No hay endpoint de alta de cuentas.
+
 El frontend debe generar una clave con `crypto.randomUUID()` por cada operación
 y reutilizarla al reintentar esa misma operación. La clave de idempotencia es
 independiente del ID de la transferencia, que genera PostgreSQL.
+Se envía exclusivamente en el header `Idempotency-Key`. La entidad `Transfer`
+incluye `IdempotencyKey`, leído de `transfers.idempotency_key` y devuelto como
+`idempotency_key` en la respuesta. `CreateTransfer` no contiene ese campo.
 
 El repositorio se usa desde el servicio así:
 
@@ -88,9 +98,38 @@ La restricción única `(user_id, idempotency_key)` junto con
 petición insertó primero, se consulta su resultado en una nueva sentencia y se
 compara la solicitud. Véase [ON CONFLICT de PostgreSQL](https://www.postgresql.org/docs/current/sql-insert.html).
 
-Esta implementación persiste transferencias; todavía no ejecuta movimientos de
-dinero ni expone una ruta HTTP para crearlas. El servicio deberá verificar el
-permiso y el acceso a la cuenta antes de llamar al repositorio.
+Esta implementación persiste transferencias pendientes; no ejecuta movimientos
+de dinero. La ruta verifica JWT y permiso, y el servicio comprueba la titularidad
+de la cuenta antes de llamar al repositorio, incluidos los reintentos.
+
+## Crear una transferencia
+
+`POST /transfers` requiere un JWT con `transfers:create` y una cuenta de origen
+asociada a su `sub`. La identidad proviene exclusivamente del token validado;
+el body no acepta `user_id`, `idempotency_key` ni campos desconocidos.
+
+```sh
+curl -i http://localhost:8080/transfers \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H 'Idempotency-Key: e764bdae-5f99-44a2-8344-9c41c8d48449' \
+  -H 'Content-Type: application/json' \
+  -d '{"from_account_id":"account-1","to_account_id":"account-2","amount":1000,"currency":"PEN","description":"Pago"}'
+```
+
+Usa una clave nueva para cada operación; el UUID del ejemplo solo es ilustrativo.
+El monto se expresa en la unidad mínima de la moneda. El body admite hasta 64 KiB.
+
+| HTTP | Resultado |
+| --- | --- |
+| 201 | Transferencia creada en estado `pending`. |
+| 200 | Reintento idéntico; devuelve la transferencia existente. |
+| 400 | Header ausente o inválido, JSON inválido o datos incorrectos. |
+| 401 | JWT ausente, inválido o vencido. |
+| 403 | Sin permiso `transfers:create` o sin titularidad de la cuenta de origen. |
+| 409 | Clave reutilizada con una solicitud diferente. |
+| 413 | Body demasiado grande. |
+| 415 | `Content-Type` distinto de `application/json`. |
+| 500 | Error interno; no expone detalles de PostgreSQL. |
 
 ## Comprobar el servidor
 
@@ -116,7 +155,7 @@ go build -o bin/api ./cmd/api
 ```
 
 Los tests cubren validación de JWT, rechazo de tokens alterados o vencidos,
-autenticación HTTP, permisos, rutas protegidas y la lógica de idempotencia.
+autenticación HTTP, permisos, titularidad, creación HTTP y la lógica de idempotencia.
 Los tests del repositorio usan respuestas simuladas y no conectan a PostgreSQL;
 la migración y la concurrencia real requieren pruebas de integración posteriores.
 
@@ -154,9 +193,8 @@ tokens.Authenticate(auth.RequirePermission(auth.PermissionTransfersCreate, handl
 ```
 
 `RequirePermission` devuelve 403 si el usuario autenticado no tiene el permiso.
-Las futuras operaciones de transferencia también deberán comprobar que el
-usuario tiene acceso a la cuenta de origen; el permiso general no lo garantiza.
-Todavía no hay endpoints de transferencias.
+`POST /transfers` aplica ese middleware y comprueba que `accounts.user_id`
+coincida con el `sub` para la cuenta de origen antes de persistir la transferencia.
 
 La validación usa las opciones documentadas de
 [golang-jwt](https://golang-jwt.github.io/jwt/usage/parse/).

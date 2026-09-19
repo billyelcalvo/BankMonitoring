@@ -44,6 +44,7 @@ func transferRow(request entities.CreateTransfer) pgx.Row {
 		*dest[8].(*time.Time) = time.Unix(100, 0).UTC()
 		payload, err := json.Marshal(request)
 		*dest[9].(*[]byte) = payload
+		*dest[10].(*string) = testKey
 		return err
 	})
 }
@@ -101,7 +102,7 @@ func TestCreateIdempotent(t *testing.T) {
 			if !errors.Is(err, tc.wantErr) || created != tc.created {
 				t.Fatalf("created=%v error=%v", created, err)
 			}
-			if err == nil && transfer.ID != "saved-transfer-id" {
+			if err == nil && (transfer.ID != "saved-transfer-id" || transfer.IdempotencyKey != testKey) {
 				t.Fatalf("unexpected transfer: %+v", transfer)
 			}
 			if db.calls != len(tc.steps) {

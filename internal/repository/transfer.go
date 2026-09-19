@@ -31,7 +31,7 @@ func NewTransferRepository(pool *pgxpool.Pool) *TransferRepository {
 }
 
 const transferColumns = `id::text, from_account_id, to_account_id, amount,
-	currency, description, status, created_at, updated_at, original_request`
+	currency, description, status, created_at, updated_at, original_request, idempotency_key::text`
 
 // CreateIdempotent persists a pending transfer, not a movement of funds.
 // The unique constraint on (user_id, idempotency_key) arbitrates concurrent
@@ -94,7 +94,7 @@ func scanTransfer(row pgx.Row) (entities.Transfer, entities.CreateTransfer, erro
 	var payload []byte
 	err := row.Scan(&transfer.ID, &transfer.FromAccountID, &transfer.ToAccountID,
 		&transfer.Amount, &transfer.Currency, &transfer.Description, &transfer.Status,
-		&transfer.CreatedAt, &transfer.UpdatedAt, &payload)
+		&transfer.CreatedAt, &transfer.UpdatedAt, &payload, &transfer.IdempotencyKey)
 	if err != nil {
 		return transfer, original, err
 	}

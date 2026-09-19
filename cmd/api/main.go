@@ -14,6 +14,7 @@ import (
 	"bankmonitoring/internal/httpapi"
 	"bankmonitoring/internal/repository"
 	"bankmonitoring/internal/service/auth"
+	"bankmonitoring/internal/service/transfer"
 )
 
 func main() {
@@ -42,6 +43,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
+	transfers := transfer.NewService(repository.NewTransferRepository(pool), repository.NewAccountRepository(pool))
 
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
@@ -50,7 +52,7 @@ func run(logger *slog.Logger) error {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           httpapi.NewHandler(tokens),
+		Handler:           httpapi.NewHandler(tokens, transfers),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
