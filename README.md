@@ -1,151 +1,154 @@
 # BankMonitoring
 
-Backend en Go con `net/http`, `github.com/golang-jwt/jwt/v5` para JWT y `pgx/v5` para PostgreSQL.
+Go backend using `net/http`, `github.com/golang-jwt/jwt/v5` for JWT, and `pgx/v5` for PostgreSQL.
 
-## Requisitos
+## Requirements
 
-- Go 1.25 o superior (requerido por pgx v5.11).
-- PostgreSQL 13 o superior.
+- Go 1.25 or later (required by pgx v5.11).
+- PostgreSQL 13 or later.
 
-## Estructura
+## Project structure
 
 ```text
-cmd/api/main.go             Entrada, configuración y ciclo de vida del servidor
-internal/service/auth/     Emisión de JWT, autenticación y permisos
-internal/service/transfer/ Creación de transferencias y comprobación de titularidad
-internal/httpapi/routes.go  Rutas y handlers HTTP
-internal/domain/entities/  Entidades de transferencias
-internal/domain/valueobjects/  Estados de transferencias
-internal/domain/repository/  Contratos de persistencia del dominio
-internal/repository/       Pool pgx e implementación de persistencia
-internal/repository/migrations/  Migraciones SQL
-go.mod                     Módulo y dependencias
+cmd/api/main.go                  Entry point, configuration, and server lifecycle
+internal/service/auth/          JWT issuance, authentication, and permissions
+internal/service/transfer/      Transfer creation and account ownership checks
+internal/httpapi/routes.go       HTTP routes and handlers
+internal/domain/entities/       Transfer entities
+internal/domain/valueobjects/   Transfer statuses
+internal/domain/repository/     Domain persistence contracts
+internal/repository/            pgx pool and persistence implementation
+internal/repository/migrations/ SQL migrations
+go.mod                          Module and dependencies
 ```
 
-## Ejecutar
+## Running the server
 
 ```sh
 export JWT_SECRET="$(openssl rand -base64 32)"
-export DATABASE_URL='postgres://usuario:clave@localhost:5432/bankmonitoring?sslmode=disable'
+export DATABASE_URL='postgres://user:password@localhost:5432/bankmonitoring?sslmode=disable'
 go run ./cmd/api
 ```
 
-`JWT_SECRET` es una clave aleatoria de al menos 32 bytes, codificada en base64.
-El servidor rechaza claves ausentes, inválidas o demasiado cortas. Conserva la
-misma clave entre reinicios e instancias; cambiarla invalida los tokens anteriores.
-No la guardes en el repositorio.
+`JWT_SECRET` is a base64-encoded random key containing at least 32 bytes.
+The server rejects missing, invalid, or excessively short keys. Keep the same
+key across restarts and instances; changing it invalidates previously issued tokens.
+Do not store it in the repository.
 
-El servidor escucha en `:8080`. Para cambiar la dirección en Bash:
+The server listens on `:8080`. To change the address in Bash:
 
 ```sh
 HTTP_ADDR=127.0.0.1:3000 go run ./cmd/api
 ```
 
-La configuración se lee de las variables del entorno; no se cargan archivos `.env` automáticamente.
+Configuration is read from environment variables; `.env` files are not loaded automatically.
 
-`DATABASE_URL` se lee en `repository.NewPool`. El pool se crea al arrancar y se
-cierra al apagar el servidor; no se ejecuta un `Ping`. El ejemplo de conexión es
-para desarrollo local. Ajusta las credenciales y TLS a tu servidor PostgreSQL.
+`DATABASE_URL` is read by `repository.NewPool`. The pool is created at startup
+and closed when the server shuts down; no `Ping` is performed. The connection
+example is intended for local development. Adjust credentials and TLS settings
+for your PostgreSQL server.
 
-## Persistencia e idempotencia
+## Persistence and idempotency
 
-Antes de usar el repositorio, aplica una vez cada migración pendiente, en orden:
+Before using the repository, apply each pending migration once, in order:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f internal/repository/migrations/001_create_transfers.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f internal/repository/migrations/002_create_accounts.sql
 ```
 
-La aplicación no ejecuta migraciones automáticamente.
+The application does not run migrations automatically.
 
-La tabla `accounts` relaciona `id` (cuenta) con `user_id` (el `sub` del JWT).
-Estas relaciones deben cargarse mediante un proceso confiable del servidor;
-no se crean a partir de una petición de transferencia. Una cuenta inexistente
-o perteneciente a otro usuario devuelve 403. No hay endpoint de alta de cuentas.
+The `accounts` table maps `id` (account) to `user_id` (the JWT's `sub`).
+These relationships must be provisioned through a trusted server-side process;
+they are not created from transfer requests. A nonexistent account or an account
+owned by another user returns 403. There is no account creation endpoint.
 
-El frontend debe generar una clave con `crypto.randomUUID()` por cada operación
-y reutilizarla al reintentar esa misma operación. La clave de idempotencia es
-independiente del ID de la transferencia, que genera PostgreSQL.
-Se envía exclusivamente en el header `Idempotency-Key`. La entidad `Transfer`
-incluye `IdempotencyKey`, leído de `transfers.idempotency_key` y devuelto como
-`idempotency_key` en la respuesta. `CreateTransfer` no contiene ese campo.
+The frontend must generate a key with `crypto.randomUUID()` for each operation
+and reuse it when retrying that operation. The idempotency key is independent
+of the transfer ID, which PostgreSQL generates.
+It is sent exclusively in the `Idempotency-Key` header. The `Transfer` entity
+includes `IdempotencyKey`, read from `transfers.idempotency_key` and returned as
+`idempotency_key` in the response. `CreateTransfer` does not include this field.
 
-El repositorio se usa desde el servicio así:
+The service uses the repository as follows:
 
 ```go
 transfers := repository.NewTransferRepository(pool)
 transfer, created, err := transfers.CreateIdempotent(ctx, userID, idempotencyKey, request)
 ```
 
-`userID` debe provenir del `sub` del JWT verificado. La clave se busca dentro de
-ese usuario, de modo que otro usuario no pueda recuperar sus transferencias.
+`userID` must come from the verified JWT's `sub`. Key lookups are scoped to that
+user so that another user cannot retrieve their transfers.
 
-- Clave nueva: guarda la transferencia en estado `pending` y devuelve `created=true`.
-- Misma clave y mismos campos: devuelve la transferencia existente con su estado
-  actual y `created=false`.
-- Misma clave con cambios de origen, destino, monto, moneda o descripción:
-  devuelve `repository.ErrIdempotencyConflict` (para mapear a HTTP 409).
-- UUID inválido, monto no positivo, cuentas vacías o iguales, o moneda sin tres
-  letras mayúsculas: devuelve `repository.ErrInvalidTransfer`.
+- New key: saves the transfer with `pending` status and returns `created=true`.
+- Same key and fields: returns the existing transfer with its current status
+  and `created=false`.
+- Same key with a different source, destination, amount, currency, or description:
+  returns `repository.ErrIdempotencyConflict` (mapped to HTTP 409).
+- Invalid UUID, nonpositive amount, empty or identical accounts, or a currency
+  without three uppercase letters: returns `repository.ErrInvalidTransfer`.
 
-Se conserva la solicitud original en JSONB para compararla aunque cambie el
-estado de la transferencia. Se comparan campos, no el orden ni los espacios del
-JSON recibido. No se deben modificar `original_request`, `user_id` ni
-`idempotency_key`, ni borrar registros mientras se admitan reintentos.
+The original request is stored as JSONB for comparison even if the transfer's
+status changes. Comparisons use field values, not the order or whitespace of the
+incoming JSON. Do not modify `original_request`, `user_id`, or `idempotency_key`,
+or delete records while retries are supported.
 
-La restricción única `(user_id, idempotency_key)` junto con
-`INSERT ... ON CONFLICT DO NOTHING` impide crear duplicados concurrentes. Si otra
-petición insertó primero, se consulta su resultado en una nueva sentencia y se
-compara la solicitud. Véase [ON CONFLICT de PostgreSQL](https://www.postgresql.org/docs/current/sql-insert.html).
+The unique constraint on `(user_id, idempotency_key)`, together with
+`INSERT ... ON CONFLICT DO NOTHING`, prevents concurrent duplicates. If another
+request inserts first, its result is retrieved in a new statement and the
+requests are compared. See [PostgreSQL ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html).
 
-Esta implementación persiste transferencias pendientes; no ejecuta movimientos
-de dinero. La ruta verifica JWT y permiso, y el servicio comprueba la titularidad
-de la cuenta antes de llamar al repositorio, incluidos los reintentos.
+This implementation persists pending transfers; it does not move funds.
+The route validates the JWT and permission, and the service checks account
+ownership before calling the repository, including on retries.
 
-## Crear una transferencia
+## Creating a transfer
 
-`POST /transfers` requiere un JWT con `transfers:create` y una cuenta de origen
-asociada a su `sub`. La identidad proviene exclusivamente del token validado;
-el body no acepta `user_id`, `idempotency_key` ni campos desconocidos.
+`POST /transfers` requires a JWT with `transfers:create` and a source account
+associated with its `sub`. Identity comes exclusively from the validated token;
+the body does not accept `user_id`, `idempotency_key`, or unknown fields.
 
 ```sh
 curl -i http://localhost:8080/transfers \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H 'Idempotency-Key: e764bdae-5f99-44a2-8344-9c41c8d48449' \
   -H 'Content-Type: application/json' \
-  -d '{"from_account_id":"account-1","to_account_id":"account-2","amount":1000,"currency":"PEN","description":"Pago"}'
+  -d '{"from_account_id":"account-1","to_account_id":"account-2","amount":1000,"currency":"PEN","description":"Payment"}'
 ```
 
-Usa una clave nueva para cada operación; el UUID del ejemplo solo es ilustrativo.
-El monto se expresa en la unidad mínima de la moneda. El body admite hasta 64 KiB.
+Use a new key for each operation; the example UUID is for illustration only.
+The amount is expressed in the currency's smallest unit. The body limit is 64 KiB.
 
-| HTTP | Resultado |
+| HTTP | Result |
 | --- | --- |
-| 201 | Transferencia creada en estado `pending`. |
-| 200 | Reintento idéntico; devuelve la transferencia existente. |
-| 400 | Header ausente o inválido, JSON inválido o datos incorrectos. |
-| 401 | JWT ausente, inválido o vencido. |
-| 403 | Sin permiso `transfers:create` o sin titularidad de la cuenta de origen. |
-| 409 | Clave reutilizada con una solicitud diferente. |
-| 413 | Body demasiado grande. |
-| 415 | `Content-Type` distinto de `application/json`. |
-| 500 | Error interno; no expone detalles de PostgreSQL. |
+| 201 | Transfer created with `pending` status. |
+| 200 | Identical retry; returns the existing transfer. |
+| 400 | Missing or invalid header, invalid JSON, or incorrect data. |
+| 401 | Missing, invalid, or expired JWT. |
+| 403 | Missing `transfers:create` permission or source account ownership. |
+| 409 | Key reused with a different request. |
+| 413 | Request body too large. |
+| 415 | `Content-Type` other than `application/json`. |
+| 500 | Internal error; PostgreSQL details are not exposed. |
 
-## Comprobar el servidor
+## Checking the server
 
 ```sh
 curl -i http://localhost:8080/health
 ```
 
-Devuelve HTTP 200 con `Content-Type: application/json`:
+Returns HTTP 200 with `Content-Type: application/json`:
 
 ```json
 {"status":"ok"}
 ```
 
-El endpoint indica que el servidor está activo. Las rutas desconocidas devuelven 404 y los métodos no admitidos, 405. `GET /health` también admite `HEAD` por el comportamiento de `net/http`.
+The endpoint indicates that the server is running. Unknown routes return 404,
+and unsupported methods return 405. `GET /health` also supports `HEAD` through
+`net/http` behavior.
 
-## Desarrollo
+## Development
 
 ```sh
 go fmt ./...
@@ -154,25 +157,25 @@ go test ./...
 go build -o bin/api ./cmd/api
 ```
 
-Los tests cubren validación de JWT, rechazo de tokens alterados o vencidos,
-autenticación HTTP, permisos, titularidad, creación HTTP y la lógica de idempotencia.
-Los tests del repositorio usan respuestas simuladas y no conectan a PostgreSQL;
-la migración y la concurrencia real requieren pruebas de integración posteriores.
+Tests cover JWT validation, rejection of tampered or expired tokens, HTTP
+authentication, permissions, ownership, transfer creation over HTTP, and idempotency.
+Repository tests use simulated responses and do not connect to PostgreSQL;
+migrations and actual concurrency require subsequent integration tests.
 
-## Autenticación y autorización
+## Authentication and authorization
 
-Un único JWT firmado con HS256 contiene `sub` (ID interno del usuario),
-`permissions`, `iss`, `aud`, `iat` y `exp`. Su vigencia es de 15 minutos.
-El emisor es `bankmonitoring` y la audiencia es `bankmonitoring-api`.
-El payload se puede leer: no contiene contraseñas, correo ni datos bancarios.
+A single JWT signed with HS256 contains `sub` (internal user ID), `permissions`,
+`iss`, `aud`, `iat`, and `exp`. It is valid for 15 minutes.
+The issuer is `bankmonitoring`, and the audience is `bankmonitoring-api`.
+The payload is readable: it contains no passwords, email addresses, or banking data.
 
-`auth.TokenService.Issue(userID, permissions)` emite el token desde código del
-servidor. Se debe llamar después de verificar las credenciales del usuario y
-obtener sus permisos de una fuente confiable. Aún no hay almacenamiento de
-usuarios, endpoint de login, renovación ni revocación de tokens. Los permisos
-incluidos en un token siguen vigentes hasta su vencimiento.
+`auth.TokenService.Issue(userID, permissions)` issues tokens from server-side
+code. Call it after verifying the user's credentials and retrieving their
+permissions from a trusted source. User storage, a login endpoint, token renewal,
+and token revocation are not implemented yet. Permissions included in a token
+remain valid until it expires.
 
-`GET /health` es público. `GET /me` requiere un token y devuelve `user_id` y
+`GET /health` is public. `GET /me` requires a token and returns `user_id` and
 `permissions`:
 
 ```sh
@@ -180,23 +183,24 @@ curl -i http://localhost:8080/me \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-`ACCESS_TOKEN` debe contener un token emitido por el servidor. El middleware
-`Authenticate` valida la firma, el algoritmo, el emisor, la audiencia y las
-fechas; guarda los claims validados en el contexto de la petición. Devuelve
-401 si falta el token o es inválido.
+`ACCESS_TOKEN` must contain a token issued by the server. The `Authenticate`
+middleware validates the signature, algorithm, issuer, audience, and timestamps,
+then stores the validated claims in the request context. It returns 401 if the
+token is missing or invalid.
 
-Los permisos disponibles son `transfers:read` y `transfers:create`. Para proteger
-una operación, se combinan los middleware en este orden:
+The available permissions are `transfers:read` and `transfers:create`. To protect
+an operation, combine the middleware in this order:
 
 ```go
 tokens.Authenticate(auth.RequirePermission(auth.PermissionTransfersCreate, handler))
 ```
 
-`RequirePermission` devuelve 403 si el usuario autenticado no tiene el permiso.
-`POST /transfers` aplica ese middleware y comprueba que `accounts.user_id`
-coincida con el `sub` para la cuenta de origen antes de persistir la transferencia.
+`RequirePermission` returns 403 if the authenticated user lacks the permission.
+`POST /transfers` applies this middleware and checks that `accounts.user_id`
+matches `sub` for the source account before persisting the transfer.
 
-La validación usa las opciones documentadas de
+Validation uses the documented options from
 [golang-jwt](https://golang-jwt.github.io/jwt/usage/parse/).
 
-Los logs se escriben en JSON a la salida estándar. Al recibir `Ctrl+C` o `SIGTERM`, el servidor deja de aceptar conexiones y espera hasta 10 segundos a que terminen las solicitudes activas.
+Logs are written as JSON to standard output. On `Ctrl+C` or `SIGTERM`, the server
+stops accepting connections and waits up to 10 seconds for active requests to finish.
