@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # Unit + integration tests in one run. The integration ones start
+      # PostgreSQL through Testcontainers, which uses the runner's Docker.
+      - name: Test
+        run: |
+          COVERPKG=$(go list ./internal/... | grep -v /testutil/ | paste -sd, -)
+          go test -race -count=1 -tags integration \
+            -coverpkg="$COVERPKG" -coverprofile=coverage.out ./...
+
+      - name: Enforce coverage >= 70%
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ { sub("%", "", $3); print $3 }')
+          echo "Total coverage: ${total}%"
+          echo "### Coverage: ${total}%" >> "$GITHUB_STEP_SUMMARY"
+          awk -v t="$total" 'BEGIN { exit (t + 0 < 70) }'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: bankmonitoring-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Bring the whole stack up the same way the README says and make sure
+      # it answers, so "one command" keeps being true.
+      - name: Smoke test with docker compose
+        run: |
+          docker compose up -d --build --wait
+          curl -fsS http://localhost:8080/ready
+          token=$(curl -fsS http://localhost:8080/auth/login -H 'Content-Type: application/json' \
+            -d '{"email":"alice@example.com","password":"demo-password"}' | jq -r .access_token)
+          curl -fsS http://localhost:8080/accounts -H "Authorization: Bearer $token"
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
