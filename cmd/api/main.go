@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"bankmonitoring/internal/config"
 	"bankmonitoring/internal/httpapi"
 	"bankmonitoring/internal/repository"
 	"bankmonitoring/internal/service/auth"
@@ -18,19 +18,20 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if err := run(logger); err != nil {
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	if err := run(cfg, logger); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
-	key, err := base64.StdEncoding.DecodeString(os.Getenv("JWT_SECRET"))
-	if err != nil {
-		return errors.New("JWT_SECRET must be a base64-encoded random key")
-	}
-	tokens, err := auth.NewTokenService(key, "bankmonitoring", "bankmonitoring-api")
+func run(cfg config.Config, logger *slog.Logger) error {
+	tokens, err := auth.NewTokenService(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAudience)
 	if err != nil {
 		return err
 	}
@@ -38,18 +39,22 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := repository.NewPool(ctx)
+	if cfg.RunMigrations {
+		version, err := repository.Migrate(cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		logger.Info("database schema up to date", "version", version)
+	}
+
+	pool, err := repository.NewPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 	transfers := transfer.NewService(repository.NewTransferRepository(pool), repository.NewAccountRepository(pool))
 
-	addr := os.Getenv("HTTP_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-
+	addr := cfg.HTTPAddr
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           httpapi.NewHandler(tokens, transfers),
@@ -73,7 +78,7 @@ func run(logger *slog.Logger) error {
 		logger.Info("shutting down server")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		_ = server.Close()

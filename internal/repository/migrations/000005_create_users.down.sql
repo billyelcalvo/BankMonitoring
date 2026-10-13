@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_user_fk;
+DROP TABLE IF EXISTS users;
+
+COMMIT;

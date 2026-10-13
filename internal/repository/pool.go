@@ -3,16 +3,15 @@ package repository
 import (
 	"context"
 	"errors"
-	"os"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NewPool reads the connection string from the process environment.
-// It does not ping PostgreSQL; connections are acquired when queries run.
-func NewPool(ctx context.Context) (*pgxpool.Pool, error) {
-	connectionString := os.Getenv("DATABASE_URL")
+// NewPool builds the connection pool and pings PostgreSQL once so a bad
+// DATABASE_URL fails at startup instead of on the first request.
+func NewPool(ctx context.Context, connectionString string, maxConns int32) (*pgxpool.Pool, error) {
 	if strings.TrimSpace(connectionString) == "" {
 		return nil, errors.New("DATABASE_URL is required")
 	}
@@ -21,5 +20,16 @@ func NewPool(ctx context.Context) (*pgxpool.Pool, error) {
 		// Parsing errors can contain credentials from the connection string.
 		return nil, errors.New("DATABASE_URL is invalid")
 	}
-	return pgxpool.NewWithConfig(ctx, config)
+	if maxConns > 0 {
+		config.MaxConns = maxConns
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("create pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return pool, nil
 }

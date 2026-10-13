@@ -171,8 +171,7 @@ func TestInvalidRequestsNeverQueryDatabase(t *testing.T) {
 }
 
 func TestPoolRequiresConnectionString(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-	if _, err := NewPool(context.Background()); err == nil {
+	if _, err := NewPool(context.Background(), " ", 10); err == nil {
 		t.Fatal("accepted missing DATABASE_URL")
 	}
 }
