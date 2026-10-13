@@ -13,6 +13,7 @@ type Permission string
 const (
 	PermissionTransfersRead   Permission = "transfers:read"
 	PermissionTransfersCreate Permission = "transfers:create"
+	PermissionAccountsRead    Permission = "accounts:read"
 	AccessTokenTTL                       = 15 * time.Minute
 )
 
