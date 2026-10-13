@@ -1,0 +1,314 @@
+openapi: 3.0.3
+info:
+  title: BankMonitoring Transfer API
+  version: 1.0.0
+  description: |
+    Money transfers between accounts with JWT authentication, row-level locking
+    and idempotent retries.
+
+    **Try it:** call `POST /auth/login` with a demo user (for example
+    `alice@example.com`), click *Authorize* and paste the `access_token`.
+
+    Amounts are integers in the currency's smallest unit (cents), so `1050`
+    means 10.50.
+servers:
+  - url: /
+tags:
+  - name: auth
+    description: Login and token introspection
+  - name: accounts
+    description: Balances of the caller's accounts
+  - name: transfers
+    description: Idempotent money movements
+  - name: health
+    description: Probes for load balancers and orchestrators
+
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Exchange email and password for an access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Token issued (valid for 15 minutes)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+
+  /me:
+    get:
+      operationId: getCurrentIdentity
+      tags: [auth]
+      summary: Identity and permissions carried by the current token
+      responses:
+        '200':
+          description: Current identity
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: string, example: user-alice }
+                  permissions:
+                    type: array
+                    items: { $ref: '#/components/schemas/Permission' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /accounts:
+    get:
+      operationId: listAccounts
+      tags: [accounts]
+      summary: List the caller's accounts
+      description: Requires the `accounts:read` permission.
+      responses:
+        '200':
+          description: Accounts owned by the caller
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /accounts/{id}:
+    get:
+      operationId: getAccount
+      tags: [accounts]
+      summary: Get one of the caller's accounts
+      description: Accounts owned by someone else answer 404, same as missing ones.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, example: acc-alice-pen }
+      responses:
+        '200':
+          description: The account and its current balance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /transfers:
+    post:
+      operationId: createTransfer
+      tags: [transfers]
+      summary: Move money from one of the caller's accounts
+      description: |
+        Requires the `transfers:create` permission and ownership of the source account.
+
+        Send a fresh UUID in `Idempotency-Key` for every logical transfer and reuse
+        it when retrying. A retry never moves money twice: it returns the stored
+        transfer with `Idempotent-Replayed: true` and the same status code family.
+        Reusing a key with a different body answers 409.
+
+        Transfers rejected for insufficient funds are stored as `failed` and answer
+        422, also on every retry with the same key.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+          example: 3f0b8f8e-6f61-4b55-9a52-1c2a3e0b9d41
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTransfer' }
+      responses:
+        '201':
+          description: Transfer completed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transfer' }
+        '200':
+          description: Retry of a completed transfer; nothing moved this time
+          headers:
+            Idempotent-Replayed: { schema: { type: string, enum: ['true'] } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transfer' }
+        '422':
+          description: |
+            The transfer can't be applied. Either a stored `failed` transfer
+            (insufficient funds, body is a Transfer) or an `Error` for an unknown
+            destination, a currency mismatch or a balance limit.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Transfer'
+                  - $ref: '#/components/schemas/Error'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Idempotency key already used with a different request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413':
+          description: Body larger than 64 KiB
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+
+  /transfers/{id}:
+    get:
+      operationId: getTransfer
+      tags: [transfers]
+      summary: Get a transfer created by the caller
+      description: Requires the `transfers:read` permission.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The transfer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transfer' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /health:
+    get:
+      operationId: health
+      tags: [health]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: The process is up
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, example: ok } } }
+
+  /ready:
+    get:
+      operationId: ready
+      tags: [health]
+      summary: Readiness probe (checks the database)
+      security: []
+      responses:
+        '200':
+          description: Ready to serve traffic
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, example: ready } } }
+        '503':
+          description: Database unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequest:
+      description: Missing or invalid header, malformed JSON or invalid data
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing, invalid or expired token (or wrong credentials on login)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Missing permission, or the source account isn't the caller's
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Not found (or not visible to the caller)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnsupportedMediaType:
+      description: Content-Type must be application/json
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Permission:
+      type: string
+      enum: [accounts:read, transfers:read, transfers:create]
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, example: alice@example.com }
+        password: { type: string, format: password }
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, example: 900 }
+
+    Account:
+      type: object
+      properties:
+        id: { type: string, example: acc-alice-pen }
+        currency: { type: string, example: PEN }
+        balance: { type: integer, format: int64, example: 100000000, description: Smallest currency unit }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateTransfer:
+      type: object
+      additionalProperties: false
+      required: [from_account_id, to_account_id, amount, currency]
+      properties:
+        from_account_id: { type: string, example: acc-alice-pen }
+        to_account_id: { type: string, example: acc-bob-pen }
+        amount: { type: integer, format: int64, minimum: 1, example: 1050 }
+        currency: { type: string, pattern: '^[A-Z]{3}$', example: PEN }
+        description: { type: string, maxLength: 255, example: Dinner }
+
+    Transfer:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        idempotency_key: { type: string, format: uuid }
+        from_account_id: { type: string }
+        to_account_id: { type: string }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [completed, failed] }
+        failure_reason: { type: string, enum: [insufficient_funds] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string, example: forbidden }

@@ -48,6 +48,8 @@ func NewHandler(d Dependencies) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /ready", ready(d.Ready))
+	mux.HandleFunc("GET /openapi.yaml", openAPISpec)
+	mux.HandleFunc("GET /docs", swaggerUI)
 	mux.HandleFunc("POST /auth/login", login(d.Login, d.Logger))
 	mux.Handle("GET /me", d.Tokens.Authenticate(http.HandlerFunc(me)))
 	mux.Handle("GET /accounts", protect(auth.PermissionAccountsRead, listAccounts(d.Accounts, d.Logger)))

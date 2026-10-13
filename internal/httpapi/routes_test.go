@@ -22,7 +22,7 @@ func TestRoutes(t *testing.T) {
 	}{
 		{"GET", "/health", "", 200}, {"GET", "/ready", "", 200}, {"GET", "/me", "", 401},
 		{"GET", "/me", raw, 200}, {"POST", "/me", raw, 405}, {"GET", "/unknown", "", 404},
-		{"GET", "/accounts", raw, 403},
+		{"GET", "/accounts", raw, 403}, {"GET", "/openapi.yaml", "", 200}, {"GET", "/docs", "", 200},
 	} {
 		w := serve(h, request{method: tc.method, path: tc.path, token: tc.token})
 		if w.Code != tc.status {
