@@ -1,0 +1,63 @@
+# One command to run everything locally:
+#   docker compose up --build
+# Load test (after the API is up):
+#   docker compose --profile loadtest run --rm k6
+#
+# Every value can be overridden from the shell or a .env file (see .env.example).
+# The defaults below are for local development only.
+
+name: bankmonitoring
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bank}
+      POSTGRES_USER: ${POSTGRES_USER:-bank}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bank}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-bank}:${POSTGRES_PASSWORD:-bank}@postgres:5432/${POSTGRES_DB:-bank}?sslmode=disable
+      # Local-only key. Generate your own with: openssl rand -base64 32
+      JWT_SECRET: ${JWT_SECRET:-Y73bJ6+7YnrtrhcDBOu1rEs0F1/MTQKizrko5zraTXA=}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-20}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-10s}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-demo-password}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  k6:
+    image: grafana/k6:2.3.0
+    profiles: ["loadtest"]
+    environment:
+      BASE_URL: http://api:8080
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-demo-password}
+      K6_VUS: ${K6_VUS:-50}
+      K6_DURATION: ${K6_DURATION:-60s}
+    volumes:
+      - ./loadtest:/scripts
+    command: ["run", "/scripts/transfers.js"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:

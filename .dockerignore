@@ -1,0 +1,9 @@
+.git
+.github
+bin
+coverage.out
+*.md
+loadtest
+docs
+.env
+.env.*

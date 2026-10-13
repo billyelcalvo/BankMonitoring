@@ -33,7 +33,7 @@ type Config struct {
 func Load(getenv func(string) string) (Config, error) {
 	var errs []error
 	cfg := Config{
-		HTTPAddr:     httpAddr(getenv),
+		HTTPAddr:     HTTPAddr(getenv),
 		DatabaseURL:  strings.TrimSpace(getenv("DATABASE_URL")),
 		JWTIssuer:    withDefault(getenv("JWT_ISSUER"), "bankmonitoring"),
 		JWTAudience:  withDefault(getenv("JWT_AUDIENCE"), "bankmonitoring-api"),
@@ -70,8 +70,8 @@ func Load(getenv func(string) string) (Config, error) {
 	return cfg, errors.Join(errs...)
 }
 
-// httpAddr honours PORT because that's what Render and Fly inject.
-func httpAddr(getenv func(string) string) string {
+// HTTPAddr honours PORT because that's what Render and Fly inject.
+func HTTPAddr(getenv func(string) string) string {
 	if addr := strings.TrimSpace(getenv("HTTP_ADDR")); addr != "" {
 		return addr
 	}
