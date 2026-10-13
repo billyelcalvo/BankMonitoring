@@ -13,6 +13,7 @@ import (
 	"bankmonitoring/internal/config"
 	"bankmonitoring/internal/httpapi"
 	"bankmonitoring/internal/repository"
+	"bankmonitoring/internal/service/account"
 	"bankmonitoring/internal/service/auth"
 	"bankmonitoring/internal/service/transfer"
 )
@@ -52,12 +53,21 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
-	transfers := transfer.NewService(repository.NewStore(pool), repository.NewTransferRepository(pool))
 
-	addr := cfg.HTTPAddr
+	transfers := repository.NewTransferRepository(pool)
+	handler := httpapi.NewHandler(httpapi.Dependencies{
+		Tokens:         tokens,
+		Login:          auth.NewLoginService(repository.NewUserRepository(pool), tokens),
+		Transfers:      transfer.NewService(repository.NewStore(pool), transfers),
+		Accounts:       account.NewService(repository.NewAccountRepository(pool)),
+		Ready:          pool.Ping,
+		Logger:         logger,
+		RequestTimeout: cfg.RequestTimeout,
+	})
+
 	server := &http.Server{
-		Addr:              addr,
-		Handler:           httpapi.NewHandler(tokens, transfers),
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -66,7 +76,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info("starting server", "addr", addr)
+		logger.Info("starting server", "addr", cfg.HTTPAddr)
 		serverErrors <- server.ListenAndServe()
 	}()
 

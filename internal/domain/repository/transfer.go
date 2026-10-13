@@ -11,8 +11,6 @@ import (
 var (
 	ErrIdempotencyConflict = errors.New("idempotency key already used with a different request")
 	ErrNotFound            = errors.New("not found")
-	// ErrInvalidTransfer is kept while the HTTP layer moves to the entity error.
-	ErrInvalidTransfer = entities.ErrInvalidTransfer
 )
 
 // NewTransfer is a transfer whose outcome the service has already decided.
