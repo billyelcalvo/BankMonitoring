@@ -3,3 +3,6 @@
 .env
 .env.*
 !.env.example
+
+# Local notes that never leave this machine
+/private/
