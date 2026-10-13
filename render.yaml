@@ -1,0 +1,38 @@
+# Render Blueprint: free web service (built from the Dockerfile) + free PostgreSQL.
+# New > Blueprint in the Render dashboard and point it at this repository.
+# Render asks for DEMO_PASSWORD on first deploy; JWT_SECRET is generated.
+
+services:
+  - type: web
+    name: bankmonitoring-api
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /ready
+    # Deploy only after the GitHub Actions checks on the commit are green.
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: bankmonitoring-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DB_MAX_CONNS
+        value: "10"
+      - key: LOG_LEVEL
+        value: info
+      - key: RUN_MIGRATIONS
+        value: "true"
+      - key: SEED_DEMO_DATA
+        value: "true"
+      - key: DEMO_PASSWORD
+        sync: false
+
+databases:
+  - name: bankmonitoring-db
+    plan: free
+    region: oregon
+    databaseName: bank
+    user: bank
