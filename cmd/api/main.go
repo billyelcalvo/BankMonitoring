@@ -52,7 +52,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
-	transfers := transfer.NewService(repository.NewTransferRepository(pool), repository.NewAccountRepository(pool))
+	transfers := transfer.NewService(repository.NewStore(pool), repository.NewTransferRepository(pool))
 
 	addr := cfg.HTTPAddr
 	server := &http.Server{

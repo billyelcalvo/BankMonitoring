@@ -13,14 +13,26 @@ import (
 	"bankmonitoring/internal/domain/valueobjects"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// These tests script the database answers to cover the idempotency branches
+// in isolation. The real PostgreSQL behaviour (locks, constraints, races) is
+// covered by the integration tests in this package.
 
 const testKey = "e764bdae-5f99-44a2-8344-9c41c8d48449"
 
 var testRequest = entities.CreateTransfer{
 	FromAccountID: "account-1", ToAccountID: "account-2", Amount: 1000,
 	Currency: "PEN", Description: "Payment",
+}
+
+func newTestTransfer() domainrepository.NewTransfer {
+	return domainrepository.NewTransfer{
+		UserID: "user-1", IdempotencyKey: testKey, Request: testRequest,
+		Status: valueobjects.TransferStatusCompleted,
+	}
 }
 
 type stubRow func(...any) error
@@ -39,12 +51,13 @@ func transferRow(request entities.CreateTransfer) pgx.Row {
 		*dest[3].(*int64) = request.Amount
 		*dest[4].(*string) = request.Currency
 		*dest[5].(*string) = request.Description
-		*dest[6].(*valueobjects.TransferStatus) = valueobjects.TransferStatusPending
-		*dest[7].(*time.Time) = time.Unix(100, 0).UTC()
+		*dest[6].(*valueobjects.TransferStatus) = valueobjects.TransferStatusCompleted
+		*dest[7].(*valueobjects.FailureReason) = valueobjects.FailureReasonNone
 		*dest[8].(*time.Time) = time.Unix(100, 0).UTC()
+		*dest[9].(*time.Time) = time.Unix(100, 0).UTC()
 		payload, err := json.Marshal(request)
-		*dest[9].(*[]byte) = payload
-		*dest[10].(*string) = testKey
+		*dest[10].(*[]byte) = payload
+		*dest[11].(*string) = testKey
 		return err
 	})
 }
@@ -76,6 +89,16 @@ func (db *scriptedDB) QueryRow(_ context.Context, sql string, args ...any) pgx.R
 	return step.row
 }
 
+func (db *scriptedDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	db.t.Fatal("unexpected Query call")
+	return nil, nil
+}
+
+func (db *scriptedDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	db.t.Fatal("unexpected Exec call")
+	return pgconn.CommandTag{}, nil
+}
+
 func TestCreateIdempotent(t *testing.T) {
 	changed := testRequest
 	changed.Amount++
@@ -86,19 +109,16 @@ func TestCreateIdempotent(t *testing.T) {
 		created bool
 		wantErr error
 	}{
-		{"new", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", transferRow(testRequest)}}, true, nil},
-		{"replay", []queryStep{{"SELECT", transferRow(testRequest)}}, false, nil},
-		{"conflict", []queryStep{{"SELECT", transferRow(changed)}}, false, domainrepository.ErrIdempotencyConflict},
-		{"concurrent replay", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", transferRow(testRequest)}}, false, nil},
-		{"concurrent conflict", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", transferRow(changed)}}, false, domainrepository.ErrIdempotencyConflict},
-		{"lookup error", []queryStep{{"SELECT", errorRow(dbError)}}, false, dbError},
-		{"insert error", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(dbError)}}, false, dbError},
-		{"concurrent lookup error", []queryStep{{"SELECT", errorRow(pgx.ErrNoRows)}, {"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", errorRow(dbError)}}, false, dbError},
+		{"new", []queryStep{{"INSERT", transferRow(testRequest)}}, true, nil},
+		{"replay", []queryStep{{"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", transferRow(testRequest)}}, false, nil},
+		{"conflict", []queryStep{{"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", transferRow(changed)}}, false, domainrepository.ErrIdempotencyConflict},
+		{"insert error", []queryStep{{"INSERT", errorRow(dbError)}}, false, dbError},
+		{"lookup error", []queryStep{{"INSERT", errorRow(pgx.ErrNoRows)}, {"SELECT", errorRow(dbError)}}, false, dbError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &scriptedDB{t: t, steps: tc.steps}
 			repo := &TransferRepository{db: db}
-			transfer, created, err := repo.CreateIdempotent(context.Background(), "user-1", testKey, testRequest)
+			transfer, created, err := repo.CreateIdempotent(context.Background(), newTestTransfer())
 			if !errors.Is(err, tc.wantErr) || created != tc.created {
 				t.Fatalf("created=%v error=%v", created, err)
 			}
@@ -134,44 +154,39 @@ func TestRequestComparison(t *testing.T) {
 			}
 		})
 	}
-	transfer := entities.Transfer{ID: "existing", Status: valueobjects.TransferStatusCompleted}
+	transfer := entities.Transfer{ID: "existing", Status: valueobjects.TransferStatusFailed}
 	got, created, err := replay(transfer, testRequest, testRequest)
 	if err != nil || created || got != transfer {
-		t.Fatal("replay must preserve the current transfer state")
+		t.Fatal("replay must preserve the stored transfer")
 	}
 }
 
-func TestInvalidRequestsNeverQueryDatabase(t *testing.T) {
-	for _, name := range []string{"key", "zero key", "user", "amount", "currency", "same account", "empty account"} {
-		t.Run(name, func(t *testing.T) {
-			request, userID, key := testRequest, "user-1", testKey
-			switch name {
-			case "key":
-				key = "invalid"
-			case "zero key":
-				key = "00000000-0000-0000-0000-000000000000"
-			case "user":
-				userID = ""
-			case "amount":
-				request.Amount = 0
-			case "currency":
-				request.Currency = "pen"
-			case "same account":
-				request.ToAccountID = request.FromAccountID
-			case "empty account":
-				request.FromAccountID = " "
-			}
+func TestInvalidKeysNeverQueryDatabase(t *testing.T) {
+	for _, key := range []string{"invalid", "00000000-0000-0000-0000-000000000000", ""} {
+		t.Run(key, func(t *testing.T) {
+			draft := newTestTransfer()
+			draft.IdempotencyKey = key
 			repo := &TransferRepository{db: &scriptedDB{t: t}}
-			_, _, err := repo.CreateIdempotent(context.Background(), userID, key, request)
-			if !errors.Is(err, domainrepository.ErrInvalidTransfer) {
+			_, _, err := repo.CreateIdempotent(context.Background(), draft)
+			if !errors.Is(err, entities.ErrInvalidTransfer) {
 				t.Fatalf("expected invalid request, got %v", err)
 			}
 		})
 	}
 }
 
+func TestFindByIDRejectsMalformedIDs(t *testing.T) {
+	repo := &TransferRepository{db: &scriptedDB{t: t}}
+	if _, err := repo.FindByID(context.Background(), "user-1", "not-a-uuid"); !errors.Is(err, domainrepository.ErrNotFound) {
+		t.Fatalf("expected not found, got %v", err)
+	}
+}
+
 func TestPoolRequiresConnectionString(t *testing.T) {
 	if _, err := NewPool(context.Background(), " ", 10); err == nil {
 		t.Fatal("accepted missing DATABASE_URL")
+	}
+	if _, err := NewPool(context.Background(), "postgres://%zz", 10); err == nil || strings.Contains(err.Error(), "%zz") {
+		t.Fatalf("invalid URL must fail without echoing it: %v", err)
 	}
 }
