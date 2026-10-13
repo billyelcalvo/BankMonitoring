@@ -50,8 +50,8 @@ services:
     environment:
       BASE_URL: http://api:8080
       DEMO_PASSWORD: ${DEMO_PASSWORD:-demo-password}
-      K6_VUS: ${K6_VUS:-50}
-      K6_DURATION: ${K6_DURATION:-60s}
+      LOAD_VUS: ${LOAD_VUS:-50}
+      LOAD_DURATION: ${LOAD_DURATION:-60s}
     volumes:
       - ./loadtest:/scripts
     command: ["run", "/scripts/transfers.js"]
