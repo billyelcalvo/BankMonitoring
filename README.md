@@ -216,12 +216,14 @@ After each run, the teardown checks that the money held by both accounts is
 unchanged, and SQL reconciliation shows every balance equals its opening
 balance plus its ledger entries.
 
-On the deployed instance (Render free tier: 0.1 CPU, 512 MB, free
-PostgreSQL), the same scenario with 10 virtual users gives approximately:
-
-| Environment | Throughput | p50 | p95 | p99 | Errors |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Render free tier, 10 VUs | ~85 req/s | ~38 ms | ~88 ms | ~140 ms | 0% |
+> **About the live demo on Render.** The numbers above were measured locally.
+> The public instance runs on Render's free plan (a fraction of a shared CPU)
+> in Oregon, so requests made from far away are slower: most of the time is
+> the network round trip (~200 ms from South America), and the small CPU
+> adds delay when several requests arrive at once. Inside the server a
+> transfer still takes about **7 ms**. Every response includes a
+> `Server-Timing` header with the time spent in the API, so you can tell
+> server time from network time.
 
 ### Other numbers
 
