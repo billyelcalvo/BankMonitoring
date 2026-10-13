@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  # Lint the integration tests too, not just the default build.
+  build-tags:
+    - integration
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - unconvert
+    - usestdlibvars
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # Test helpers deliberately use plain requests and fixed values.
+      - path: _test\.go
+        linters: [gosec, noctx, bodyclose]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - bankmonitoring

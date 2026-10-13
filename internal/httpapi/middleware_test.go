@@ -52,7 +52,7 @@ func TestRecoverPanics(t *testing.T) {
 		panic("something broke")
 	}))
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
 	if w.Code != http.StatusInternalServerError || !bytes.Contains(buf.Bytes(), []byte("something broke")) {
 		t.Fatalf("status=%d log=%s", w.Code, buf.String())
 	}
@@ -64,5 +64,5 @@ func TestWithTimeoutSetsDeadline(t *testing.T) {
 			t.Fatal("request context has no deadline")
 		}
 	}))
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 }
