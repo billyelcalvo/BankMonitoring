@@ -13,6 +13,7 @@ import (
 	"bankmonitoring/internal/config"
 	"bankmonitoring/internal/httpapi"
 	"bankmonitoring/internal/repository"
+	"bankmonitoring/internal/seed"
 	"bankmonitoring/internal/service/account"
 	"bankmonitoring/internal/service/auth"
 	"bankmonitoring/internal/service/transfer"
@@ -53,6 +54,13 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
+
+	if cfg.SeedDemoData {
+		if err := seed.Demo(ctx, pool, cfg.DemoPassword); err != nil {
+			return err
+		}
+		logger.Info("demo data ready")
+	}
 
 	transfers := repository.NewTransferRepository(pool)
 	handler := httpapi.NewHandler(httpapi.Dependencies{
