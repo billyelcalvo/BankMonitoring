@@ -46,7 +46,9 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
-func accessLog(logger *slog.Logger, next http.Handler) http.Handler {
+// accessLog takes routeOf because the mux records the matched pattern on its
+// own copy of the request, so r.Pattern is always empty out here.
+func accessLog(logger *slog.Logger, routeOf func(*http.Request) string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -64,7 +66,7 @@ func accessLog(logger *slog.Logger, next http.Handler) http.Handler {
 			slog.String("request_id", requestIDFrom(r.Context())),
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
-			slog.String("route", r.Pattern),
+			slog.String("route", routeOf(r)),
 			slog.Int("status", rec.status),
 			slog.Float64("duration_ms", float64(time.Since(start).Microseconds())/1000),
 		)

@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -114,5 +116,20 @@ func TestLoginRoute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAccessLogRecordsMatchedRoute(t *testing.T) {
+	var buf bytes.Buffer
+	tokens := testTokens(t)
+	h := NewHandler(Dependencies{Tokens: tokens, Transfers: &transferStub{}, Logger: slog.New(slog.NewJSONHandler(&buf, nil))})
+	serve(h, request{method: "GET", path: "/transfers/abc-123", token: issue(t, tokens, auth.PermissionTransfersRead)})
+
+	var entry map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("log line is not JSON: %s", buf.String())
+	}
+	if entry["route"] != "GET /transfers/{id}" {
+		t.Fatalf("expected the route pattern, got %v", entry["route"])
 	}
 }

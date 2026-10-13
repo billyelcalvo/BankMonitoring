@@ -29,7 +29,8 @@ func TestRequestIDIsPropagatedOrGenerated(t *testing.T) {
 func TestAccessLogIsStructured(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	h := requestID(accessLog(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	routeOf := func(*http.Request) string { return "GET /brew" }
+	h := requestID(accessLog(logger, routeOf, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	})))
 	serve(h, request{method: "GET", path: "/brew"})
@@ -38,7 +39,7 @@ func TestAccessLogIsStructured(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
 		t.Fatalf("log line is not JSON: %s", buf.String())
 	}
-	if entry["status"] != float64(418) || entry["path"] != "/brew" || entry["method"] != "GET" || entry["request_id"] == "" {
+	if entry["status"] != float64(418) || entry["path"] != "/brew" || entry["route"] != "GET /brew" || entry["method"] != "GET" || entry["request_id"] == "" {
 		t.Fatalf("missing fields in %v", entry)
 	}
 	if _, ok := entry["duration_ms"]; !ok {

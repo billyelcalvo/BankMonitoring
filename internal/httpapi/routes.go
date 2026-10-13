@@ -59,7 +59,11 @@ func NewHandler(d Dependencies) http.Handler {
 
 	// Outermost first: recover from panics, tag the request, log it, then
 	// put a deadline on everything downstream (including database calls).
-	return recoverPanics(d.Logger, requestID(accessLog(d.Logger, withTimeout(d.RequestTimeout, mux))))
+	routeOf := func(r *http.Request) string {
+		_, pattern := mux.Handler(r)
+		return pattern
+	}
+	return recoverPanics(d.Logger, requestID(accessLog(d.Logger, routeOf, withTimeout(d.RequestTimeout, mux))))
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {
