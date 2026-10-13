@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -66,4 +67,29 @@ func TestWithTimeoutSetsDeadline(t *testing.T) {
 		}
 	}))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+func TestServerTimingHeader(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	for name, handler := range map[string]http.HandlerFunc{
+		"explicit status": func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(5 * time.Millisecond)
+			w.WriteHeader(http.StatusCreated)
+		},
+		"implicit status": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			routeOf := func(*http.Request) string { return "" }
+			w := serve(accessLog(logger, routeOf, handler), request{method: http.MethodGet, path: "/"})
+			var dur float64
+			if _, err := fmt.Sscanf(w.Header().Get("Server-Timing"), "app;dur=%f", &dur); err != nil {
+				t.Fatalf("missing or malformed Server-Timing: %q", w.Header().Get("Server-Timing"))
+			}
+			if name == "explicit status" && dur < 5 {
+				t.Fatalf("duration should include the handler's work, got %.1f ms", dur)
+			}
+		})
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -36,14 +37,35 @@ func requestIDFrom(ctx context.Context) string {
 	return id
 }
 
+// statusRecorder captures the status for the access log and adds a
+// Server-Timing header, so clients (k6, browser dev tools) can tell server
+// time apart from network time. Handlers here write the response only after
+// all their work is done, so the time at WriteHeader is the server time.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	start       time.Time
+	status      int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
-	r.status = status
+	if !r.wroteHeader {
+		r.wroteHeader = true
+		r.status = status
+		r.Header().Set("Server-Timing", fmt.Sprintf("app;dur=%.1f", milliseconds(time.Since(r.start))))
+	}
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+func milliseconds(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000
 }
 
 // accessLog takes routeOf because the mux records the matched pattern on its
@@ -51,7 +73,7 @@ func (r *statusRecorder) WriteHeader(status int) {
 func accessLog(logger *slog.Logger, routeOf func(*http.Request) string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		rec := &statusRecorder{ResponseWriter: w, start: start, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 
 		level := slog.LevelInfo
@@ -68,7 +90,7 @@ func accessLog(logger *slog.Logger, routeOf func(*http.Request) string, next htt
 			slog.String("path", r.URL.Path),
 			slog.String("route", routeOf(r)),
 			slog.Int("status", rec.status),
-			slog.Float64("duration_ms", float64(time.Since(start).Microseconds())/1000),
+			slog.Float64("duration_ms", milliseconds(time.Since(start))),
 		)
 	})
 }
