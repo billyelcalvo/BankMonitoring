@@ -22,6 +22,14 @@ const EXPECTED_TOTAL = Number(__ENV.EXPECTED_TOTAL || 200000000);
 const replays = new Counter('idempotent_replays');
 const duplicatedMoves = new Counter('duplicated_moves');
 const transferLatency = new Trend('transfer_latency', true);
+// Time spent inside the API, read from its Server-Timing header. The gap
+// between this and http_req_duration is network (and proxy) time.
+const serverTime = new Trend('server_time', true);
+
+function recordServerTime(res) {
+  const match = /dur=([\d.]+)/.exec(res.headers['Server-Timing'] || '');
+  if (match) serverTime.add(Number(match[1]));
+}
 
 export const options = {
   scenarios: {
@@ -82,11 +90,13 @@ export default function (users) {
 
   const res = http.post(`${BASE_URL}/transfers`, body, params);
   transferLatency.add(res.timings.duration);
+  recordServerTime(res);
   check(res, { 'transfer created (201)': (r) => r.status === 201 });
 
   if (Math.random() < 0.1) {
     const retry = http.post(`${BASE_URL}/transfers`, body, params);
     transferLatency.add(retry.timings.duration);
+    recordServerTime(retry);
     const ok = check(retry, {
       'retry replayed (200)': (r) => r.status === 200 && r.headers['Idempotent-Replayed'] === 'true',
       'retry returns the same transfer': (r) => r.json('id') === res.json('id'),
@@ -122,6 +132,9 @@ export function handleSummary(data) {
     `| Requests to POST /transfers | ${reqs.values.count} total, ${reqs.values.rate.toFixed(0)} req/s |`,
     `| Latency avg / p50 | ${fmt(d.values.avg)} / ${fmt(d.values.med)} |`,
     `| Latency p90 / p95 / p99 | ${fmt(d.values['p(90)'])} / ${fmt(d.values['p(95)'])} / ${fmt(d.values['p(99)'])} |`,
+    ...(m.server_time
+      ? [`| Server time p50 / p95 / p99 (Server-Timing) | ${fmt(m.server_time.values.med)} / ${fmt(m.server_time.values['p(95)'])} / ${fmt(m.server_time.values['p(99)'])} |`]
+      : []),
     `| Failed requests | ${(m['http_req_failed{name:create_transfer}'].values.rate * 100).toFixed(2)}% |`,
     `| Idempotent replays verified | ${m.idempotent_replays ? m.idempotent_replays.values.count : 0} |`,
     `| Duplicated money movements | ${m.duplicated_moves ? m.duplicated_moves.values.count : 0} |`,
