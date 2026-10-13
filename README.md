@@ -1,206 +1,372 @@
-# BankMonitoring
+# BankMonitoring — Bank Transfer API
 
-Go backend using `net/http`, `github.com/golang-jwt/jwt/v5` for JWT, and `pgx/v5` for PostgreSQL.
+[![CI](https://github.com/billyelcalvo/BankMonitoring/actions/workflows/ci.yml/badge.svg)](https://github.com/billyelcalvo/BankMonitoring/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go)
+![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen)
+![PostgreSQL](https://img.shields.io/badge/postgres-17-336791?logo=postgresql)
 
-## Requirements
+A money transfer service in Go and PostgreSQL that stays correct when many
+requests fight over the same accounts and when clients retry the same request.
 
-- Go 1.25 or later (required by pgx v5.11).
-- PostgreSQL 13 or later.
+- **Live API:** https://bankmonitoring-api.onrender.com
+- **Interactive docs (Swagger UI):** https://bankmonitoring-api.onrender.com/docs
+- **OpenAPI spec:** [`api/openapi.yaml`](api/openapi.yaml), also served at `/openapi.yaml`
+- **Demo users:** `alice@example.com`, `bob@example.com`, `carol@example.com` (password `demo-password`)
 
-## Project structure
+> The free Render instance sleeps when idle, so the first request after a
+> while can take ~30 s to wake it up.
 
-```text
-cmd/api/main.go                  Entry point, configuration, and server lifecycle
-internal/service/auth/          JWT issuance, authentication, and permissions
-internal/service/transfer/      Transfer creation and account ownership checks
-internal/httpapi/routes.go       HTTP routes and handlers
-internal/domain/entities/       Transfer entities
-internal/domain/valueobjects/   Transfer statuses
-internal/domain/repository/     Domain persistence contracts
-internal/repository/            pgx pool and persistence implementation
-internal/repository/migrations/ SQL migrations
-go.mod                          Module and dependencies
+---
+
+## The problem
+
+Moving money looks simple: subtract here, add there. It gets hard when:
+
+1. **Two transfers from the same account arrive at the same time.** Both read a
+   balance of 100, both decide 80 is affordable, both write. The account
+   spent 160 out of 100. This is the classic *double spend* race.
+2. **The client retries.** A mobile app times out after the server already
+   moved the money, so it sends the request again. Without protection, the
+   transfer happens twice.
+
+This service guarantees that, under concurrency and retries:
+
+- a balance never goes below zero and the same money is never spent twice;
+- each logical transfer executes **exactly once**, no matter how many times it
+  is sent, including retries sent in parallel;
+- every movement is recorded in a double-entry ledger that reconciles with the
+  balances.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client([Client]) -->|HTTPS + JWT| mw
+
+    subgraph api["HTTP layer · internal/httpapi"]
+        mw["Middleware<br/>recover · request ID · access log · timeout"]
+        authz["JWT auth + permission check"]
+        handlers["Handlers<br/>/auth/login · /accounts · /transfers"]
+        mw --> authz --> handlers
+    end
+
+    subgraph svc["Service layer · internal/service"]
+        transfer["transfer.Service<br/>locks, rules, idempotency"]
+        account["account.Service"]
+        login["auth.LoginService<br/>bcrypt + token issuing"]
+    end
+
+    subgraph domain["Domain · internal/domain"]
+        entities["Entities<br/>Account.Debit / Credit<br/>CreateTransfer.Validate"]
+        contracts["Repository contracts<br/>TxManager · Tx"]
+    end
+
+    subgraph repo["Repository · internal/repository"]
+        pg["pgx implementation<br/>Store.WithinTx · embedded migrations"]
+    end
+
+    handlers --> transfer & account & login
+    transfer & account & login --> entities
+    transfer & account & login --> contracts
+    pg -. implements .-> contracts
+    pg --> db[(PostgreSQL<br/>accounts · transfers<br/>ledger_entries · users)]
 ```
 
-## Running the server
+Dependencies point inwards: handlers know services, services know the domain
+and the repository **interfaces**, and only `internal/repository` knows pgx and
+SQL. That's why the service can be unit tested with an in-memory store
+([`service_test.go`](internal/service/transfer/service_test.go)) and the same
+code runs against PostgreSQL in the integration tests.
+
+### What happens on `POST /transfers`
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant H as Handler
+    participant S as transfer.Service
+    participant DB as PostgreSQL
+
+    C->>H: POST /transfers (JWT, Idempotency-Key)
+    H->>H: verify JWT, permission, key format, body
+    H->>S: Create(userID from JWT, key, request)
+    S->>DB: BEGIN (READ COMMITTED)
+    S->>DB: SELECT … FROM accounts WHERE id IN (from, to)<br/>ORDER BY id FOR UPDATE
+    Note over S,DB: concurrent transfers touching these<br/>accounts wait here, one at a time
+    S->>S: owner? same currency? enough balance?
+    S->>DB: INSERT INTO transfers … ON CONFLICT (user_id, idempotency_key) DO NOTHING
+    alt key already used (retry)
+        S->>DB: SELECT stored transfer, compare request
+        S->>DB: COMMIT (nothing moved)
+        S-->>H: stored transfer → 200 + Idempotent-Replayed (409 if body differs)
+    else new and funded
+        S->>DB: UPDATE accounts (both balances)
+        S->>DB: INSERT 2 ledger entries (-amount, +amount)
+        S->>DB: COMMIT
+        S-->>H: completed → 201
+    else new but insufficient funds
+        S->>DB: COMMIT (transfer stored as failed)
+        S-->>H: failed → 422
+    end
+```
+
+## Design decisions and trade-offs
+
+**Pessimistic locking (`SELECT … FOR UPDATE`) instead of optimistic versioning.**
+Transfers concentrate on a few hot accounts (payroll, merchants). With
+optimistic locking, every collision is a failed attempt that has to be retried,
+and under heavy contention most of the work is wasted. Row locks make
+competitors wait in line instead, so each one succeeds on the first try. The
+cost is that throughput for a *single* account pair is bounded by how fast one
+transaction can run, as the load test shows (~1,650 transfers/s on one pair).
+Transfers between different accounts don't block each other.
+
+**Locks are taken in ascending account ID order.** A→B and B→A at the same time
+is the textbook deadlock. Sorting the IDs before `FOR UPDATE` means every
+transaction acquires locks in the same order, so a cycle can't form. The
+integration suite runs 1,000 transfers in both directions to prove it.
+
+**READ COMMITTED, not SERIALIZABLE.** Correctness comes from the row locks,
+not from the isolation level. SERIALIZABLE would also be correct, but it aborts
+conflicting transactions and pushes retry loops into the application.
+
+**Idempotency lives in the same transaction as the money movement.** The
+`UNIQUE (user_id, idempotency_key)` constraint decides who wins. If two copies
+of the same request race, the second `INSERT` waits for the first transaction
+and then does nothing, so there is no window where both can move money.
+Keeping the key in Redis or another store would need a distributed lock and
+could disagree with the database after a crash.
+
+**Keys are scoped per user and tied to the request body.** One user can't
+read another user's transfer by guessing a key, and reusing a key with a
+different amount or account is answered with `409` instead of silently
+returning the old result.
+
+**Failed transfers are stored too.** A transfer rejected for insufficient funds
+is saved as `failed`, so a retry gets the same `422` even if the account was
+topped up in between. A retry should never turn into a different operation.
+
+**Money as integers in the smallest unit.** `amount: 1050` is 10.50 PEN. No
+floating point, and overflow is checked on credit.
+
+**Double-entry ledger + a database CHECK.** Every completed transfer writes a
+debit and a credit that sum to zero, so any balance can be rebuilt from the
+ledger. `CHECK (balance >= 0)` is a last line of defence: if a bug ever got
+past the service, PostgreSQL would abort the transaction instead of storing an
+overdraft.
+
+**Ownership is checked on the locked row, and a missing source answers 403.**
+"Doesn't exist" and "isn't yours" look the same from outside, so the API
+can't be used to probe which account IDs exist.
+
+**Synchronous transfers.** The client gets the final result in the same
+request. A queue-based design would absorb bigger spikes on a single hot
+account, but it adds eventual consistency, a worker and a status-polling flow
+to the client. For p95 < 100 ms at this scale, it isn't needed.
+
+**Short-lived JWTs (HS256, 15 min) without refresh tokens.** Tokens carry the
+user ID and permissions from the `users` table. Revocation means waiting for
+expiry; refresh tokens and key rotation are the natural next step.
+
+**Migrations run on startup.** golang-migrate takes a PostgreSQL advisory lock,
+so several replicas starting at once is safe. Migrations are embedded in the
+binary, versioned (`000001_…up.sql` / `…down.sql`) and can be turned off with
+`RUN_MIGRATIONS=false` if a separate release step is preferred.
+
+## Results
+
+### Correctness under concurrency (integration tests, real PostgreSQL)
+
+| Scenario | Result |
+| --- | --- |
+| 1,000 transfers of 100 released at the same instant from an account holding 10,000 | exactly **100 completed, 900 rejected (422)**, final balance **0**, ledger reconciled, in ~0.6 s |
+| Same test with `FOR UPDATE` removed (sanity check that the test catches races) | **175** completed: 75 double spends, test fails |
+| 1,000 transfers in both directions between 3 accounts | no deadlocks, no 500s, total money unchanged, ledger reconciled |
+| 50 transfers × 20 parallel retries each (1,000 requests) | **50 created, 950 replays**, one transfer per key, money moved exactly 50 times |
+| Retry of a failed transfer after topping up the account | still `422`, nothing moved |
+
+### Load test (k6)
+
+All virtual users move money between **the same two accounts**, the worst case
+for lock contention, and about 10% of iterations immediately retry with the
+same key. Run against the Docker Compose stack (API + PostgreSQL + k6 on one
+machine, 8 vCPU / 8 GB for Docker), 30–60 s at steady load.
+
+| Virtual users | Throughput | p50 | p95 | p99 | Errors | Replays verified | Duplicate moves |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | ~1,690 req/s | 4.3 ms | **10.1 ms** | 13.0 ms | 0% | 6,930 | 0 |
+| 50 | ~1,525 req/s | 26.6 ms | **57.3 ms** | 81.8 ms | 0% | 10,431 | 0 |
+| 100 | ~1,635 req/s | 53.2 ms | **80.1 ms** | 98.9 ms | 0% | 6,710 | 0 |
+
+```mermaid
+xychart-beta
+    title "POST /transfers p95 latency on one hot account pair"
+    x-axis "Virtual users" [10, 50, 100]
+    y-axis "p95 (ms)" 0 --> 100
+    bar [10.1, 57.3, 80.1]
+    line [100, 100, 100]
+```
+
+Throughput stays flat at ~1,600–1,700 transfers/s while latency grows with the
+number of users. That is the row lock doing its job: transfers on the same
+pair run one after another, so extra users only make the queue longer. The
+p95 target of **100 ms** holds even at 100 concurrent users on a single pair.
+After each run, the teardown checks that the money held by both accounts is
+unchanged, and SQL reconciliation shows every balance equals its opening
+balance plus its ledger entries.
+
+On the deployed instance (Render free tier: 0.1 CPU, 512 MB, free
+PostgreSQL), the same scenario with 10 virtual users gives approximately:
+
+| Environment | Throughput | p50 | p95 | p99 | Errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Render free tier, 10 VUs | ~85 req/s | ~38 ms | ~88 ms | ~140 ms | 0% |
+
+### Other numbers
+
+| | |
+| --- | --- |
+| Test coverage (unit + integration, `./internal/...`) | **95%** (CI fails below 70%) |
+| Runtime image | ~21 MB (distroless, non-root) |
+| Cold start to ready (migrations + seed) | ~0.2 s locally |
+
+## Running it
+
+### Everything with one command
 
 ```sh
+docker compose up --build
+```
+
+This starts PostgreSQL, applies migrations, seeds the demo users and serves
+the API on http://localhost:8080 (docs at http://localhost:8080/docs).
+
+```sh
+# 1. log in
+TOKEN=$(curl -s localhost:8080/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"demo-password"}' | jq -r .access_token)
+
+# 2. move 10.50 PEN from Alice to Bob
+KEY=$(uuidgen)
+curl -i localhost:8080/transfers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"from_account_id":"acc-alice-pen","to_account_id":"acc-bob-pen","amount":1050,"currency":"PEN"}'
+
+# 3. send exactly the same request again: 200 + Idempotent-Replayed: true, nothing moves
+# 4. check balances
+curl -s localhost:8080/accounts -H "Authorization: Bearer $TOKEN" | jq
+```
+
+### Tests
+
+```sh
+go test ./...                                   # unit tests, no Docker needed
+go test -race -tags integration ./...           # + integration tests (needs Docker)
+```
+
+Integration tests start their own PostgreSQL with
+[Testcontainers](https://golang.testcontainers.org/), so nothing else has to be
+running.
+
+### Load test
+
+```sh
+docker compose up -d --build
+docker compose --profile loadtest run --rm k6                         # 50 VUs, 60 s
+LOAD_VUS=100 LOAD_DURATION=30s docker compose --profile loadtest run --rm k6
+```
+
+The k6 run fails if p95 ≥ 100 ms, errors ≥ 1%, or any retry moves money twice.
+A Markdown summary is written to `loadtest/results/summary.md`. To hit
+another environment: `BASE_URL=https://… k6 run loadtest/transfers.js`.
+
+### Without Docker
+
+```sh
+export DATABASE_URL='postgres://user:pass@localhost:5432/bank?sslmode=disable'
 export JWT_SECRET="$(openssl rand -base64 32)"
-export DATABASE_URL='postgres://user:password@localhost:5432/bankmonitoring?sslmode=disable'
+export SEED_DEMO_DATA=true DEMO_PASSWORD=demo-password
 go run ./cmd/api
 ```
 
-`JWT_SECRET` is a base64-encoded random key containing at least 32 bytes.
-The server rejects missing, invalid, or excessively short keys. Keep the same
-key across restarts and instances; changing it invalidates previously issued tokens.
-Do not store it in the repository.
+## Configuration
 
-The server listens on `:8080`. To change the address in Bash:
+Everything comes from environment variables; see [`.env.example`](.env.example).
+The app has no default for secrets and refuses to start without them.
 
-```sh
-HTTP_ADDR=127.0.0.1:3000 go run ./cmd/api
-```
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | required | PostgreSQL connection string |
+| `JWT_SECRET` | required | base64, at least 32 bytes (`openssl rand -base64 32`) |
+| `HTTP_ADDR` / `PORT` | `:8080` | `PORT` is what Render and Fly inject |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | `bankmonitoring` / `bankmonitoring-api` | |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `DB_MAX_CONNS` | `20` | pool size |
+| `REQUEST_TIMEOUT` | `10s` | deadline for each request, database calls included |
+| `SHUTDOWN_TIMEOUT` | `10s` | graceful shutdown on SIGTERM |
+| `RUN_MIGRATIONS` | `true` | apply pending migrations on startup |
+| `SEED_DEMO_DATA` | `false` | create demo users and funded accounts |
+| `DEMO_PASSWORD` | — | required when seeding, min. 8 characters |
 
-Configuration is read from environment variables; `.env` files are not loaded automatically.
+Logs are JSON on stdout, one line per request with `request_id`, `method`,
+`route`, `status` and `duration_ms`. `X-Request-ID` is accepted from the
+caller or generated, and returned on every response.
 
-`DATABASE_URL` is read by `repository.NewPool`. The pool is created at startup
-and closed when the server shuts down; no `Ping` is performed. The connection
-example is intended for local development. Adjust credentials and TLS settings
-for your PostgreSQL server.
+## API
 
-## Persistence and idempotency
+| Method | Path | Permission | Description |
+| --- | --- | --- | --- |
+| `POST` | `/auth/login` | — | email + password → JWT (15 min) |
+| `GET` | `/me` | any token | identity and permissions in the token |
+| `GET` | `/accounts` | `accounts:read` | the caller's accounts and balances |
+| `GET` | `/accounts/{id}` | `accounts:read` | one account (404 if not the caller's) |
+| `POST` | `/transfers` | `transfers:create` | create a transfer; requires `Idempotency-Key` (UUID) |
+| `GET` | `/transfers/{id}` | `transfers:read` | a transfer created by the caller |
+| `GET` | `/health` | — | liveness |
+| `GET` | `/ready` | — | readiness (pings the database) |
+| `GET` | `/docs`, `/openapi.yaml` | — | Swagger UI and the OpenAPI 3 spec |
 
-Before using the repository, apply each pending migration once, in order:
+`POST /transfers` answers:
 
-```sh
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f internal/repository/migrations/001_create_transfers.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f internal/repository/migrations/002_create_accounts.sql
-```
-
-The application does not run migrations automatically.
-
-The `accounts` table maps `id` (account) to `user_id` (the JWT's `sub`).
-These relationships must be provisioned through a trusted server-side process;
-they are not created from transfer requests. A nonexistent account or an account
-owned by another user returns 403. There is no account creation endpoint.
-
-The frontend must generate a key with `crypto.randomUUID()` for each operation
-and reuse it when retrying that operation. The idempotency key is independent
-of the transfer ID, which PostgreSQL generates.
-It is sent exclusively in the `Idempotency-Key` header. The `Transfer` entity
-includes `IdempotencyKey`, read from `transfers.idempotency_key` and returned as
-`idempotency_key` in the response. `CreateTransfer` does not include this field.
-
-The service uses the repository as follows:
-
-```go
-transfers := repository.NewTransferRepository(pool)
-transfer, created, err := transfers.CreateIdempotent(ctx, userID, idempotencyKey, request)
-```
-
-`userID` must come from the verified JWT's `sub`. Key lookups are scoped to that
-user so that another user cannot retrieve their transfers.
-
-- New key: saves the transfer with `pending` status and returns `created=true`.
-- Same key and fields: returns the existing transfer with its current status
-  and `created=false`.
-- Same key with a different source, destination, amount, currency, or description:
-  returns `repository.ErrIdempotencyConflict` (mapped to HTTP 409).
-- Invalid UUID, nonpositive amount, empty or identical accounts, or a currency
-  without three uppercase letters: returns `repository.ErrInvalidTransfer`.
-
-The original request is stored as JSONB for comparison even if the transfer's
-status changes. Comparisons use field values, not the order or whitespace of the
-incoming JSON. Do not modify `original_request`, `user_id`, or `idempotency_key`,
-or delete records while retries are supported.
-
-The unique constraint on `(user_id, idempotency_key)`, together with
-`INSERT ... ON CONFLICT DO NOTHING`, prevents concurrent duplicates. If another
-request inserts first, its result is retrieved in a new statement and the
-requests are compared. See [PostgreSQL ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html).
-
-This implementation persists pending transfers; it does not move funds.
-The route validates the JWT and permission, and the service checks account
-ownership before calling the repository, including on retries.
-
-## Creating a transfer
-
-`POST /transfers` requires a JWT with `transfers:create` and a source account
-associated with its `sub`. Identity comes exclusively from the validated token;
-the body does not accept `user_id`, `idempotency_key`, or unknown fields.
-
-```sh
-curl -i http://localhost:8080/transfers \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H 'Idempotency-Key: e764bdae-5f99-44a2-8344-9c41c8d48449' \
-  -H 'Content-Type: application/json' \
-  -d '{"from_account_id":"account-1","to_account_id":"account-2","amount":1000,"currency":"PEN","description":"Payment"}'
-```
-
-Use a new key for each operation; the example UUID is for illustration only.
-The amount is expressed in the currency's smallest unit. The body limit is 64 KiB.
-
-| HTTP | Result |
+| Status | Meaning |
 | --- | --- |
-| 201 | Transfer created with `pending` status. |
-| 200 | Identical retry; returns the existing transfer. |
-| 400 | Missing or invalid header, invalid JSON, or incorrect data. |
-| 401 | Missing, invalid, or expired JWT. |
-| 403 | Missing `transfers:create` permission or source account ownership. |
-| 409 | Key reused with a different request. |
-| 413 | Request body too large. |
-| 415 | `Content-Type` other than `application/json`. |
-| 500 | Internal error; PostgreSQL details are not exposed. |
+| `201` | completed |
+| `200` | retry of a completed transfer (`Idempotent-Replayed: true`), nothing moved |
+| `422` | stored as failed for insufficient funds (same answer on retries), unknown destination or currency mismatch |
+| `409` | the key was already used with a different request |
+| `400` / `413` / `415` | invalid header or body, body over 64 KiB, wrong content type |
+| `401` / `403` | missing or invalid token, missing permission or not the source owner |
 
-## Checking the server
+## CI/CD and deployment
 
-```sh
-curl -i http://localhost:8080/health
+[GitHub Actions](.github/workflows/ci.yml) runs on every push and pull request:
+
+1. **lint**: golangci-lint (gofmt, goimports, govet, gosec, errorlint, …)
+2. **test**: unit + integration tests with `-race` against PostgreSQL in
+   Testcontainers, failing below 70% coverage
+3. **docker**: builds the image and boots the compose stack exactly as
+   documented above, then logs in and lists accounts
+
+Deployment is a [Render Blueprint](render.yaml): a Docker web service and a
+PostgreSQL database. Render generates `JWT_SECRET`, uses `/ready` as its health
+check and only deploys commits whose CI checks passed.
+
+## Project layout
+
+```text
+cmd/api/                     entry point, wiring, graceful shutdown, healthcheck
+api/openapi.yaml             OpenAPI 3 spec (embedded in the binary)
+internal/config/             environment-based configuration
+internal/httpapi/            routes, handlers, middleware
+internal/service/transfer/   transfer orchestration (locks, rules, idempotency)
+internal/service/account/    account queries
+internal/service/auth/       JWT, login, permission middleware
+internal/domain/             entities, value objects, repository contracts
+internal/repository/         pgx implementation and versioned migrations
+internal/seed/               optional demo data
+test/integration/            end-to-end concurrency and idempotency tests
+loadtest/                    k6 script and latest results
 ```
-
-Returns HTTP 200 with `Content-Type: application/json`:
-
-```json
-{"status":"ok"}
-```
-
-The endpoint indicates that the server is running. Unknown routes return 404,
-and unsupported methods return 405. `GET /health` also supports `HEAD` through
-`net/http` behavior.
-
-## Development
-
-```sh
-go fmt ./...
-go vet ./...
-go test ./...
-go build -o bin/api ./cmd/api
-```
-
-Tests cover JWT validation, rejection of tampered or expired tokens, HTTP
-authentication, permissions, ownership, transfer creation over HTTP, and idempotency.
-Repository tests use simulated responses and do not connect to PostgreSQL;
-migrations and actual concurrency require subsequent integration tests.
-
-## Authentication and authorization
-
-A single JWT signed with HS256 contains `sub` (internal user ID), `permissions`,
-`iss`, `aud`, `iat`, and `exp`. It is valid for 15 minutes.
-The issuer is `bankmonitoring`, and the audience is `bankmonitoring-api`.
-The payload is readable: it contains no passwords, email addresses, or banking data.
-
-`auth.TokenService.Issue(userID, permissions)` issues tokens from server-side
-code. Call it after verifying the user's credentials and retrieving their
-permissions from a trusted source. User storage, a login endpoint, token renewal,
-and token revocation are not implemented yet. Permissions included in a token
-remain valid until it expires.
-
-`GET /health` is public. `GET /me` requires a token and returns `user_id` and
-`permissions`:
-
-```sh
-curl -i http://localhost:8080/me \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-`ACCESS_TOKEN` must contain a token issued by the server. The `Authenticate`
-middleware validates the signature, algorithm, issuer, audience, and timestamps,
-then stores the validated claims in the request context. It returns 401 if the
-token is missing or invalid.
-
-The available permissions are `transfers:read` and `transfers:create`. To protect
-an operation, combine the middleware in this order:
-
-```go
-tokens.Authenticate(auth.RequirePermission(auth.PermissionTransfersCreate, handler))
-```
-
-`RequirePermission` returns 403 if the authenticated user lacks the permission.
-`POST /transfers` applies this middleware and checks that `accounts.user_id`
-matches `sub` for the source account before persisting the transfer.
-
-Validation uses the documented options from
-[golang-jwt](https://golang-jwt.github.io/jwt/usage/parse/).
-
-Logs are written as JSON to standard output. On `Ctrl+C` or `SIGTERM`, the server
-stops accepting connections and waits up to 10 seconds for active requests to finish.
